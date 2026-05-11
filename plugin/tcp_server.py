@@ -43,6 +43,17 @@ def dispatch(request):
         return exec_code(code, error_mode)
     if cmd == "screenshot":
         return _screenshot(request)
+    # dedicated RLPy API commands (imported lazily so non-iClone test envs work)
+    try:
+        import iclone_api
+    except Exception as e:
+        return {"status": "error", "type": "ImportError", "msg": f"iclone_api unavailable: {e}"}
+    handler = iclone_api.COMMANDS.get(cmd)
+    if handler is not None:
+        try:
+            return handler(request)
+        except Exception as e:
+            return {"status": "error", "type": type(e).__name__, "msg": str(e)}
     return {"status": "error", "type": "UnknownCommand", "msg": f"unknown cmd: {cmd}"}
 
 

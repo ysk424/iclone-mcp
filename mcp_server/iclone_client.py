@@ -6,8 +6,8 @@ PORT = 54321
 TIMEOUT = 10
 
 
-def _send(request: dict) -> dict:
-    with socket.create_connection((HOST, PORT), timeout=TIMEOUT) as s:
+def _send(request: dict, timeout: float = TIMEOUT) -> dict:
+    with socket.create_connection((HOST, PORT), timeout=timeout) as s:
         s.sendall(json.dumps(request).encode("utf-8"))
         data = b""
         while True:
@@ -28,6 +28,12 @@ def execute_python(code: str, error_mode: str = "minimal") -> dict:
 
 def get_screenshot(x: int = 0, y: int = 0, w: int = 1280, h: int = 720, screen: int = 0) -> dict:
     return _send({"cmd": "screenshot", "x": x, "y": y, "w": w, "h": h, "screen": screen})
+
+
+def call(cmd: str, timeout: float = TIMEOUT, **params) -> dict:
+    req = {"cmd": cmd}
+    req.update(params)
+    return _send(req, timeout=timeout)
 
 
 def ping() -> bool:
