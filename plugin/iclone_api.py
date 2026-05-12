@@ -16,15 +16,37 @@ import RLPy
 # helpers
 # ---------------------------------------------------------------------------
 
+def _jsonable(v):
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, dict):
+        return {str(k): _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    # RLPy value types (RFps, RTime, RVector3, ...) — try common accessors
+    for m in ("GetValue", "ToFloat", "ToInt"):
+        f = getattr(v, m, None)
+        if callable(f):
+            try:
+                return _jsonable(f())
+            except Exception:
+                pass
+    try:
+        return float(v)
+    except Exception:
+        pass
+    return repr(v)
+
+
 def _ok(**kw):
     d = {"status": "ok"}
-    d.update(kw)
+    d.update({k: _jsonable(v) for k, v in kw.items()})
     return d
 
 
 def _err(exc, **kw):
     d = {"status": "error", "type": type(exc).__name__, "msg": str(exc)}
-    d.update(kw)
+    d.update({k: _jsonable(v) for k, v in kw.items()})
     return d
 
 
@@ -127,47 +149,55 @@ def list_motions(_req):
         return _err(e)
 
 
+def _scene_names(getter):
+    try:
+        fn = getattr(RLPy.RScene, getter, None)
+        if fn is None:
+            return None
+        return [o.GetName() for o in fn()]
+    except Exception:
+        return None
+
+
+def _fps_value():
+    try:
+        return float(RLPy.RGlobal.GetFps().ToFloat())
+    except Exception:
+        try:
+            return float(RLPy.RGlobal.GetFps())
+        except Exception:
+            return None
+
+
+def _frame_of(rtime):
+    try:
+        return RLPy.RGlobal.GetFps().GetFrameIndex(rtime)
+    except Exception:
+        return None
+
+
 def get_scene_summary(_req):
     try:
         summary = {
-            "avatars": [a.GetName() for a in RLPy.RScene.GetAvatars()],
-            "props": [p.GetName() for p in RLPy.RScene.GetProps()],
-            "lights": [l.GetName() for l in RLPy.RScene.GetLights()],
-            "cameras": [c.GetName() for c in RLPy.RScene.GetCameras()],
+            "avatars": _scene_names("GetAvatars"),
+            "props": _scene_names("GetProps"),
+            "lights": _scene_names("GetLights"),
+            "cameras": _scene_names("GetCameras"),
         }
         try:
             cam = RLPy.RScene.GetCurrentCamera()
             summary["current_camera"] = cam.GetName() if cam else None
         except Exception:
             summary["current_camera"] = None
-        # fps
-        for getter in ("GetFps",):
-            try:
-                summary["fps"] = RLPy.RGlobal.__dict__.get(getter) and getattr(RLPy.RGlobal, getter)()
-            except Exception:
-                pass
+        summary["fps"] = _fps_value()
         try:
-            summary["fps"] = RLPy.RGlobal.GetFps()
+            summary["end_frame"] = _frame_of(RLPy.RGlobal.GetProjectLength())
         except Exception:
-            summary.setdefault("fps", None)
-        # project length / frame range (best effort, API varies by version)
+            summary["end_frame"] = None
         try:
-            length = RLPy.RGlobal.GetProjectLength()
-            fps = summary.get("fps")
-            end_frame = None
-            try:
-                end_frame = length.GetFrameIndex(fps) if fps else None
-            except Exception:
-                end_frame = None
-            summary["project_length_ms"] = length.GetValue() if hasattr(length, "GetValue") else str(length)
-            summary["end_frame"] = end_frame
+            summary["current_frame"] = _frame_of(RLPy.RGlobal.GetTime())
         except Exception:
-            pass
-        try:
-            t = RLPy.RGlobal.GetTime()
-            summary["current_time_ms"] = t.GetValue() if hasattr(t, "GetValue") else str(t)
-        except Exception:
-            pass
+            summary["current_frame"] = None
         return _ok(summary=summary)
     except Exception as e:
         return _err(e)
@@ -287,6 +317,9 @@ def export_avatar_fbx(req):
 
         ts_table = _TEXSIZE()
         tf_table = _TEXFMT()
+        # accept "1024" as an alias for "Size_1024"
+        if tex_size not in ts_table and ("Size_" + str(tex_size)) in ts_table:
+            tex_size = "Size_" + str(tex_size)
         if tex_size not in ts_table:
             return _err(ValueError("unknown texture_size: {!r}; valid: {}".format(tex_size, sorted(ts_table))))
         if tex_fmt not in tf_table:
@@ -307,18 +340,11 @@ def export_avatar_fbx(req):
         ok = status == RLPy.RStatus.Success
 
         # scene metadata for downstream (Blender)
-        fps = None
+        fps = _fps_value()
         try:
-            fps = RLPy.RGlobal.GetFps()
+            end_frame = _frame_of(RLPy.RGlobal.GetProjectLength())
         except Exception:
-            pass
-        end_frame = None
-        length_ms = None
-        try:
-            length = RLPy.RGlobal.GetProjectLength()
-            length_ms = length.GetValue() if hasattr(length, "GetValue") else None
-        except Exception:
-            pass
+            end_frame = None
 
         textures_dir = None
         for cand in ("textures", "texture", avatar.GetName() + ".fbm"):
@@ -333,7 +359,6 @@ def export_avatar_fbx(req):
             "out_dir": out_dir,
             "textures_dir": textures_dir,
             "fps": fps,
-            "project_length_ms": length_ms,
             "end_frame": end_frame,
             "applied_options": {"options": opts, "options2": opts2, "options3": opts3,
                                 "texture_size": tex_size, "texture_format": tex_fmt,
