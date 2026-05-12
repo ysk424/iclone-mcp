@@ -259,119 +259,97 @@ def list_fbx_export_options(_req):
         return _err(e)
 
 
-def _build_flags(names, table, none_value, label):
-    val = none_value
-    bad = []
-    for n in names or []:
-        if n in table:
-            val = val | table[n]
-        else:
-            bad.append(n)
-    if bad:
-        raise ValueError("unknown {} flag(s): {}; valid: {}".format(
-            label, bad, sorted(k for k in table if k != "_None")))
-    return val
+# NOTE: exporting FBX from this plugin crashes iClone (heavy RLPy call from the
+# TCP worker thread / clashing with the export progress UI). So the export is
+# done by a human in iClone's UI; the tools below only (a) tell the human where
+# to export and with what settings, and (b) build a handoff manifest afterwards.
+
+def get_export_recipe(req):
+    """Suggest an output directory, filename and FBX export flags for a human to use."""
+    try:
+        avatar = _find_avatar(req.get("avatar"))
+        if avatar is None:
+            return _err(ValueError("avatar not found: {!r}; scene avatars: {}".format(
+                req.get("avatar"), [a.GetName() for a in RLPy.RScene.GetAvatars()])))
+        name = avatar.GetName()
+        out_dir = req.get("out_handle") or _new_spool_dir(name)
+        os.makedirs(out_dir, exist_ok=True)
+        fbx_path = os.path.join(out_dir, name + ".fbx")
+        return _ok(
+            avatar_name=name,
+            target_dir=out_dir,
+            target_fbx=fbx_path,
+            recommended=_PRESET_BLENDER,
+            note=("In iClone: select '{}', File > Export > FBX, save to the path "
+                  "in target_fbx, and enable the options under 'recommended'. "
+                  "Then call make_export_manifest with that path.").format(name),
+        )
+    except Exception as e:
+        return _err(e)
 
 
 _LAST_MANIFEST = {"value": None}
 
 
-def get_last_export_manifest(_req):
-    if _LAST_MANIFEST["value"] is None:
-        return _ok(manifest=None)
-    return _ok(manifest=_LAST_MANIFEST["value"])
-
-
-def export_avatar_fbx(req):
+def make_export_manifest(req):
+    """After a human exported an FBX, gather scene metadata + file layout into a
+    manifest (and write it as JSON next to the FBX) for the Blender MCP."""
     try:
-        avatar_name = req.get("avatar")
-        avatar = _find_avatar(avatar_name)
-        if avatar is None:
-            return _err(ValueError("avatar not found: {!r}; scene avatars: {}".format(
-                avatar_name, [a.GetName() for a in RLPy.RScene.GetAvatars()])))
+        fbx_path = req.get("fbx_path")
+        if not fbx_path:
+            return _err(ValueError("fbx_path is required"))
+        if not os.path.isfile(fbx_path):
+            return _err(ValueError("file not found: {}".format(fbx_path)))
+        out_dir = os.path.dirname(fbx_path)
+        stem = os.path.splitext(os.path.basename(fbx_path))[0]
 
-        preset = req.get("preset")
-        opts = list(req.get("options") or [])
-        opts2 = list(req.get("options2") or [])
-        opts3 = list(req.get("options3") or [])
-        tex_size = req.get("texture_size")
-        tex_fmt = req.get("texture_format")
-        motion_path = req.get("motion_path") or ""
-
-        if preset:
-            p = {"blender": _PRESET_BLENDER}.get(preset)
-            if p is None:
-                return _err(ValueError("unknown preset: {!r}".format(preset)))
-            opts = list(p.get("options", [])) + opts
-            opts2 = list(p.get("options2", [])) + opts2
-            opts3 = list(p.get("options3", [])) + opts3
-            tex_size = tex_size or p.get("texture_size")
-            tex_fmt = tex_fmt or p.get("texture_format")
-
-        tex_size = tex_size or "Original"
-        tex_fmt = tex_fmt or "Default"
-
-        f1 = _build_flags(opts, _OPT1(), RLPy.EExportFbxOptions__None, "options")
-        f2 = _build_flags(opts2, _OPT2(), RLPy.EExportFbxOptions2__None, "options2")
-        f3 = _build_flags(opts3, _OPT3(), RLPy.EExportFbxOptions3__None, "options3")
-
-        ts_table = _TEXSIZE()
-        tf_table = _TEXFMT()
-        # accept "1024" as an alias for "Size_1024"
-        if tex_size not in ts_table and ("Size_" + str(tex_size)) in ts_table:
-            tex_size = "Size_" + str(tex_size)
-        if tex_size not in ts_table:
-            return _err(ValueError("unknown texture_size: {!r}; valid: {}".format(tex_size, sorted(ts_table))))
-        if tex_fmt not in tf_table:
-            return _err(ValueError("unknown texture_format: {!r}; valid: {}".format(tex_fmt, sorted(tf_table))))
-        ts_val = ts_table[tex_size]
-        tf_val = tf_table[tex_fmt]
-
-        out_handle = req.get("out_handle")
-        if out_handle:
-            out_dir = out_handle
-            os.makedirs(out_dir, exist_ok=True)
-        else:
-            out_dir = _new_spool_dir(avatar.GetName())
-        fbx_path = os.path.join(out_dir, avatar.GetName() + ".fbx")
-
-        status = RLPy.RFileIO.ExportFbxFile(
-            avatar, fbx_path, f1, f2, f3, ts_val, tf_val, motion_path)
-        ok = status == RLPy.RStatus.Success
-
-        # scene metadata for downstream (Blender)
-        fps = _fps_value()
-        try:
-            end_frame = _frame_of(RLPy.RGlobal.GetProjectLength())
-        except Exception:
-            end_frame = None
+        avatar = _find_avatar(req.get("avatar") or stem)
+        avatar_name = avatar.GetName() if avatar else (req.get("avatar") or stem)
 
         textures_dir = None
-        for cand in ("textures", "texture", avatar.GetName() + ".fbm"):
+        for cand in (stem + ".fbm", "textures", "texture", "Texture"):
             p = os.path.join(out_dir, cand)
             if os.path.isdir(p):
                 textures_dir = p
                 break
 
-        manifest = {
-            "avatar_name": avatar.GetName(),
+        json_sidecar = None
+        cand = os.path.join(out_dir, stem + ".json")
+        if os.path.isfile(cand):
+            json_sidecar = cand
+
+        try:
+            end_frame = _frame_of(RLPy.RGlobal.GetProjectLength())
+        except Exception:
+            end_frame = None
+
+        manifest = _jsonable({
+            "source": "iclone",
+            "avatar_name": avatar_name,
             "fbx": fbx_path,
             "out_dir": out_dir,
             "textures_dir": textures_dir,
-            "fps": fps,
+            "iclone_json_sidecar": json_sidecar,
+            "fps": _fps_value(),
             "end_frame": end_frame,
-            "applied_options": {"options": opts, "options2": opts2, "options3": opts3,
-                                "texture_size": tex_size, "texture_format": tex_fmt,
-                                "motion_path": motion_path or None, "preset": preset},
             "next": "blender-mcp",
-        }
+        })
         _LAST_MANIFEST["value"] = manifest
-
-        if not ok:
-            return _err(RuntimeError("ExportFbxFile returned Failure"), manifest=manifest)
-        return _ok(handle=out_dir, fbx_path=fbx_path, manifest=manifest)
+        manifest_path = os.path.join(out_dir, stem + ".iclone_manifest.json")
+        try:
+            import json as _json
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                _json.dump(manifest, f, indent=2, ensure_ascii=False)
+            manifest["manifest_path"] = manifest_path
+        except Exception:
+            pass
+        return _ok(manifest=manifest)
     except Exception as e:
         return _err(e)
+
+
+def get_last_export_manifest(_req):
+    return _ok(manifest=_LAST_MANIFEST["value"])
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +362,7 @@ COMMANDS = {
     "list_motions": list_motions,
     "get_scene_summary": get_scene_summary,
     "list_fbx_export_options": list_fbx_export_options,
+    "get_export_recipe": get_export_recipe,
+    "make_export_manifest": make_export_manifest,
     "get_last_export_manifest": get_last_export_manifest,
-    "export_avatar_fbx": export_avatar_fbx,
 }

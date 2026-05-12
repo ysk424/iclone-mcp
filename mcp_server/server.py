@@ -123,57 +123,39 @@ def list_fbx_export_options() -> str:
     return _fmt(ic.call("list_fbx_export_options"))
 
 
+# NOTE: FBX export itself is done by a human in iClone's UI — exporting via this
+# plugin crashes iClone. These tools only bracket that manual step.
+
 @mcp.tool()
-def export_avatar_fbx(
-    avatar: str = "",
-    preset: str = "blender",
-    options: list[str] | None = None,
-    options2: list[str] | None = None,
-    options3: list[str] | None = None,
-    texture_size: str = "",
-    texture_format: str = "",
-    motion_path: str = "",
-    out_handle: str = "",
-) -> str:
-    """Export an avatar (with skin, animation and materials/textures) to FBX for Blender.
-
-    avatar: avatar name; empty = currently selected avatar (or the only one).
-    preset: starting flag set; "blender" by default. Pass "" for no preset.
-    options/options2/options3: extra EExportFbxOptions* flag names (suffix only,
-      e.g. "EmbedTexture"). Added on top of the preset. Call list_fbx_export_options
-      for valid names. Unknown names return an error listing valid ones.
-    texture_size: Original/256/512/1024/2048/4096 (empty = preset/Original).
-    texture_format: Default/Bmp/Jpeg/Tga/Png/Tif (empty = preset/Default).
-    motion_path: optional path to an animation file (strIncludeMotionPath), e.g. a T-pose .rlmotion.
+def get_export_recipe(avatar: str = "", out_handle: str = "") -> str:
+    """Get an FBX export recipe for a human to follow in iClone: an auto-managed
+    output directory, the exact filename to save as, and recommended export flags.
+    avatar: avatar name; empty = currently selected avatar.
     out_handle: optional output directory; empty = auto-managed spool dir.
-
-    Returns a handle (directory), the fbx path, and a manifest (fps, project length,
-    applied options, etc.) to hand to the Blender MCP. Re-export with adjusted
-    options if the Blender import looks wrong."""
-    params = {"preset": preset}
+    Tell the human the target_fbx path and the recommended options, then after
+    they export, call make_export_manifest with that path."""
+    params = {}
     if avatar:
         params["avatar"] = avatar
-    if options:
-        params["options"] = options
-    if options2:
-        params["options2"] = options2
-    if options3:
-        params["options3"] = options3
-    if texture_size:
-        params["texture_size"] = texture_size
-    if texture_format:
-        params["texture_format"] = texture_format
-    if motion_path:
-        params["motion_path"] = motion_path
     if out_handle:
         params["out_handle"] = out_handle
-    return _fmt(ic.call("export_avatar_fbx", timeout=600, **params))
+    return _fmt(ic.call("get_export_recipe", **params))
+
+
+@mcp.tool()
+def make_export_manifest(fbx_path: str, avatar: str = "") -> str:
+    """After a human exported an FBX from iClone, build a handoff manifest for the
+    Blender MCP: avatar name, fbx path, textures dir, fps, frame range, plus a
+    JSON sidecar written next to the FBX. Pass the path the human exported to."""
+    params = {"fbx_path": fbx_path}
+    if avatar:
+        params["avatar"] = avatar
+    return _fmt(ic.call("make_export_manifest", **params))
 
 
 @mcp.tool()
 def get_last_export_manifest() -> str:
-    """Return the manifest from the most recent export_avatar_fbx call
-    (fbx path, output dir, fps, applied options). Useful for re-exporting with tweaks."""
+    """Return the manifest from the most recent make_export_manifest call."""
     return _fmt(ic.call("get_last_export_manifest"))
 
 
