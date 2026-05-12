@@ -4,3 +4,11 @@ __pycache__/
 backups/
 .claude/
 MEMORY.md
+
+# local export scratch / pipeline artifacts (never commit big FBX dumps)
+test/
+*.fbx
+*.fbm/
+tests/textures/
+tests/haruko2.*
+*.iclone_manifest.json

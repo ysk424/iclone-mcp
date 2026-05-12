@@ -51,8 +51,11 @@ def _err(exc, **kw):
 
 
 def _spool_root():
-    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
-    path = os.path.join(base, "iclone-mcp", "spool")
+    # somewhere a human can actually navigate to from a Save dialog
+    home = os.path.expanduser("~")
+    docs = os.path.join(home, "Documents")
+    base = docs if os.path.isdir(docs) else (os.environ.get("LOCALAPPDATA") or tempfile.gettempdir())
+    path = os.path.join(base, "iclone-mcp-spool")
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -306,12 +309,12 @@ def make_export_manifest(req):
         avatar = _find_avatar(req.get("avatar") or stem)
         avatar_name = avatar.GetName() if avatar else (req.get("avatar") or stem)
 
-        textures_dir = None
+        texture_dirs = []
         for cand in (stem + ".fbm", "textures", "texture", "Texture"):
             p = os.path.join(out_dir, cand)
             if os.path.isdir(p):
-                textures_dir = p
-                break
+                texture_dirs.append(p)
+        textures_dir = texture_dirs[0] if texture_dirs else None
 
         json_sidecar = None
         cand = os.path.join(out_dir, stem + ".json")
@@ -329,6 +332,7 @@ def make_export_manifest(req):
             "fbx": fbx_path,
             "out_dir": out_dir,
             "textures_dir": textures_dir,
+            "texture_dirs": texture_dirs,
             "iclone_json_sidecar": json_sidecar,
             "fps": _fps_value(),
             "end_frame": end_frame,
